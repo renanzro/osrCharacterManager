@@ -1,9 +1,9 @@
 import { createRouter, createWebHistory } from 'vue-router';
 
-import Home from '../pages/Home.vue';
-import ManageLevelZero from '../pages/ManageLevelZero.vue';
-import manageCharacters from '../pages/ManageCharacters.vue';
-import ManageRandomTables from '../pages/ManageRandomTables.vue';
+const Home = () => import('../pages/Home.vue');
+const ManageLevelZero = () => import('../pages/ManageLevelZero.vue');
+const ManageCharacters = () => import('../pages/ManageCharacters.vue');
+const ManageRandomTables = () => import('../pages/ManageRandomTables.vue');
 
 const routes = [
   {
@@ -19,7 +19,7 @@ const routes = [
   {
     path: '/manage-character',
     name: 'manageCharacters',
-    component: manageCharacters
+    component: ManageCharacters
   },
   {
     path: '/manage-random-tables',

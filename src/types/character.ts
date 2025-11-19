@@ -1,6 +1,5 @@
 import { DiceType } from './dice';
 import type { CharacterAttributes } from './attributes.ts';
-import type { EquipmentItem } from './tables';
 
 export enum SavingThrowType {
   DEATH, // death/poison
@@ -27,16 +26,17 @@ export interface CharacterClass {
   savingThrows: CharacterSavingThrows;
 }
 
-// Level-zero character: random attributes and occupation, no class
+// Level-zero character: random attributes and occupation reference, no class
+// Occupation details (name, equipment, weapon) are resolved from the table + entry IDs
 export interface LevelZeroCharacter {
   id: string;
   name: string;
   attributes: CharacterAttributes;
-  // human-readable occupation name (fallback)
-  occupation: string;
-  // structured equipment items: name, optional quantity, optional unit and optional observation
-  equipment: EquipmentItem[];
-  // starting gold pieces
+  /** ID of the occupation table (e.g., 'level-zero-occupations') */
+  occupationTableId: string;
+  /** ID of the specific occupation entry (e.g., '01-02') */
+  occupationEntryId: string;
+  /** starting gold pieces */
   gp: number;
   createdAt: Date;
 }

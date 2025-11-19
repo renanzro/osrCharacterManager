@@ -51,7 +51,7 @@
           <v-card>
             <!-- Editable Name -->
             <v-card-title
-              v-if="!editingId.includes(char.id)"
+              v-if="!editingId.has(char.id)"
               class="text-subtitle-1 d-flex justify-space-between align-center"
             >
               <span>{{ char.name }}</span>
@@ -164,17 +164,20 @@
 
 <script setup lang="ts">
   import { ref, onMounted, watch } from 'vue';
+  import { useI18n } from 'vue-i18n';
   import { v4 as uuidv4 } from 'uuid';
-  import { AttributeType, CharacterAttributes } from '../types/attributes.ts';
-  import type { LevelZeroCharacter } from '../types/character.ts';
+
   import { Occupations } from '../constants/level-zero-characters.ts';
+  import { abilityScoreBonus } from '../constants/character-classes.ts';
+
   import { findEntryByRoll } from '../helpers/rollingTable.ts';
   import { generateCharacterName } from '../helpers/nameGenerator.ts';
-  import { abilityScoreBonus } from '../constants/character-classes.ts';
-  import { useI18n } from 'vue-i18n';
-  import type { EquipmentItem } from '../types/tables';
+  import { resolveOccupation } from '../helpers/character.ts';
 
-  const { t, te } = useI18n();
+  import { AttributeType, CharacterAttributes } from '../types/attributes.ts';
+  import { LevelZeroCharacter } from '../types/character.ts';
+
+  const { t, locale } = useI18n();
 
   const STORAGE_KEY = 'osrcharactermanager.levelZero.characters';
 
@@ -183,7 +186,277 @@
   const charactersToGenerate = ref<number>(3);
   const isGenerating = ref<boolean>(false);
   const fileInput = ref<HTMLInputElement | null>(null);
-  const editingId = ref<string[]>([]);
+  const editingId = ref<Set<string>>(new Set());
+  //#endregion
+
+  //#region Helpers (dice, bonus formatting)
+  function roll3d6(): number {
+    return Array.from({ length: 3 }, () => Math.floor(Math.random() * 6) + 1).reduce(
+      (a, b) => a + b,
+      0
+    );
+  }
+
+  function getAbilityBonus(score: number): number {
+    const row = abilityScoreBonus.find(r => score >= r.min && score <= r.max);
+    return row?.bonus ?? 0;
+  }
+
+  function formatBonus(bonus: number): string {
+    if (bonus > 0) return `+${bonus}`;
+    if (bonus < 0) return `${bonus}`;
+    return '0';
+  }
+
+  // Get localized occupation name by resolving from table
+  function getLocalizedOccupationName(char: LevelZeroCharacter): string {
+    const occupation = resolveOccupation(char, [Occupations], locale.value);
+    return occupation?.name ?? t('manageLevelZero.none');
+  }
+
+  // Get formatted equipment display
+  function getEquipmentDisplay(char: LevelZeroCharacter): string {
+    const occupation = resolveOccupation(char, [Occupations], locale.value);
+    if (!occupation) return String(t('manageLevelZero.none'));
+
+    const items: string[] = [];
+
+    // Add weapon first if present
+    if (occupation.weapon) {
+      items.push(occupation.weapon.name);
+    }
+
+    // Add equipment items
+    occupation.equipment.forEach(item => {
+      let itemStr = item.name;
+
+      if (item.quantity != null) {
+        if (item.unit) {
+          itemStr += ` (${item.quantity} ${item.unit})`;
+        } else {
+          itemStr += ` (${item.quantity}x)`;
+        }
+      }
+
+      if (item.observation) {
+        itemStr += ` — ${item.observation}`;
+      }
+
+      items.push(itemStr);
+    });
+
+    return items.length > 0 ? items.join(', ') : String(t('manageLevelZero.none'));
+  }
+  //#endregion
+
+  //#region Generators (attributes & character)
+  function generateRandomAttributes(): CharacterAttributes {
+    return {
+      [AttributeType.STRENGTH]: roll3d6(),
+      [AttributeType.INTELLIGENCE]: roll3d6(),
+      [AttributeType.WISDOM]: roll3d6(),
+      [AttributeType.DEXTERITY]: roll3d6(),
+      [AttributeType.CONSTITUTION]: roll3d6(),
+      [AttributeType.CHARISMA]: roll3d6()
+    };
+  }
+
+  function generateLevelZeroCharacter(): LevelZeroCharacter {
+    const roll = Math.floor(Math.random() * 100) + 1; // 1..100
+    const occupationEntry = findEntryByRoll(Occupations, roll);
+    if (!occupationEntry) throw new Error(`No occupation for roll ${roll}`);
+
+    return {
+      id: uuidv4(),
+      name: generateCharacterName(),
+      attributes: generateRandomAttributes(),
+      occupationTableId: Occupations.id,
+      occupationEntryId: occupationEntry.id,
+      gp: roll3d6(),
+      createdAt: new Date()
+    };
+  }
+  //#endregion
+
+  //#region File I/O (import / export / copy)
+  function characterToJSON(char: LevelZeroCharacter): string {
+    return JSON.stringify({ ...char, createdAt: char.createdAt.toISOString() }, null, 2);
+  }
+
+  function copyCharacterToClipboard(char: LevelZeroCharacter) {
+    navigator.clipboard.writeText(characterToJSON(char));
+  }
+
+  function exportCharactersToJSON() {
+    const data = characters.value.map(c => ({ ...c, createdAt: c.createdAt.toISOString() }));
+    const json = JSON.stringify(data, null, 2);
+    const blob = new Blob([json], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    // include full timestamp (YYYY-MM-DD_HH-mm-ss) in filename; replace ':' to avoid filesystem issues
+    const now = new Date();
+    const timestamp = now.toISOString().replace(/:/g, '-').replace(/\..+$/, '').replace('T', '_');
+    a.download = `level-zero-characters-${timestamp}.json`;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+  }
+
+  function openFileInput() {
+    fileInput.value?.click();
+  }
+
+  function validateImportedCharacter(data: unknown, index: number): LevelZeroCharacter {
+    if (typeof data !== 'object' || data === null) {
+      throw new Error(`Character at index ${index}: must be an object`);
+    }
+
+    const c = data as Record<string, unknown>;
+
+    if (typeof c.id !== 'string' || !c.id) {
+      throw new Error(`Character at index ${index}: missing or invalid 'id' field`);
+    }
+
+    if (typeof c.name !== 'string' || !c.name) {
+      throw new Error(`Character at index ${index}: missing or invalid 'name' field`);
+    }
+
+    if (typeof c.occupationTableId !== 'string' || !c.occupationTableId) {
+      throw new Error(`Character at index ${index}: missing or invalid 'occupationTableId' field`);
+    }
+
+    if (typeof c.occupationEntryId !== 'string' || !c.occupationEntryId) {
+      throw new Error(`Character at index ${index}: missing or invalid 'occupationEntryId' field`);
+    }
+
+    if (typeof c.gp !== 'number' || c.gp < 0) {
+      throw new Error(`Character at index ${index}: 'gp' must be a non-negative number`);
+    }
+
+    // Validate attributes
+    if (typeof c.attributes !== 'object' || c.attributes === null) {
+      throw new Error(`Character at index ${index}: missing or invalid 'attributes' object`);
+    }
+
+    const attrs = c.attributes as Record<string, unknown>;
+    const requiredAttrs = [
+      AttributeType.STRENGTH,
+      AttributeType.INTELLIGENCE,
+      AttributeType.WISDOM,
+      AttributeType.DEXTERITY,
+      AttributeType.CONSTITUTION,
+      AttributeType.CHARISMA
+    ];
+
+    for (const attr of requiredAttrs) {
+      if (typeof attrs[attr] !== 'number' || attrs[attr] < 3 || attrs[attr] > 18) {
+        throw new Error(
+          `Character at index ${index}: attribute '${attr}' must be a number between 3 and 18`
+        );
+      }
+    }
+
+    // Validate createdAt
+    if (typeof c.createdAt !== 'string' && !(c.createdAt instanceof Date)) {
+      throw new Error(`Character at index ${index}: 'createdAt' must be a string or Date`);
+    }
+    let createdAtDate: Date;
+    if (typeof c.createdAt === 'string') {
+      createdAtDate = new Date(c.createdAt);
+    } else {
+      createdAtDate = c.createdAt;
+    }
+
+    return {
+      id: c.id,
+      name: c.name,
+      attributes: attrs as unknown as CharacterAttributes,
+      occupationTableId: c.occupationTableId,
+      occupationEntryId: c.occupationEntryId,
+      gp: c.gp,
+      createdAt: createdAtDate
+    };
+  }
+
+  function importCharactersFromJSON(event: Event) {
+    const input = event.target as HTMLInputElement;
+    const file = input.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = e => {
+      try {
+        const result = e.target?.result;
+        if (typeof result !== 'string') {
+          throw new Error('Failed to read file content');
+        }
+
+        const parsed: unknown = JSON.parse(result);
+        const arr = Array.isArray(parsed) ? parsed : [parsed];
+
+        if (arr.length === 0) {
+          throw new Error('No characters found in file');
+        }
+
+        const validated = arr.map((data, index) => validateImportedCharacter(data, index));
+
+        const imported: LevelZeroCharacter[] = validated.map(c => ({
+          id: c.id,
+          name: c.name,
+          attributes: c.attributes,
+          occupationTableId: c.occupationTableId,
+          occupationEntryId: c.occupationEntryId,
+          gp: c.gp,
+          createdAt: c.createdAt instanceof Date ? c.createdAt : new Date(c.createdAt)
+        }));
+
+        characters.value.push(...imported);
+        alert(
+          `Successfully imported ${imported.length} character${imported.length !== 1 ? 's' : ''}`
+        );
+      } catch (err) {
+        console.error('Import failed', err);
+        const errorMessage = err instanceof Error ? err.message : 'Unknown error';
+        alert(`Failed to import characters:\n\n${errorMessage}`);
+      } finally {
+        if (fileInput.value) fileInput.value.value = '';
+      }
+    };
+    reader.readAsText(file);
+  }
+  //#endregion
+
+  //#region UI Actions (generate, remove, edit)
+  async function generateCharacters() {
+    isGenerating.value = true;
+    try {
+      await new Promise(res => setTimeout(res, 300));
+      const count = Math.min(Math.max(1, Number(charactersToGenerate.value || 1)), 100);
+      for (let i = 0; i < count; i++) {
+        characters.value.push(generateLevelZeroCharacter());
+      }
+    } finally {
+      isGenerating.value = false;
+    }
+  }
+
+  function removeCharacter(id: string) {
+    characters.value = characters.value.filter(c => c.id !== id);
+  }
+
+  function clearCharacters() {
+    characters.value = [];
+  }
+
+  function startEditingName(id: string) {
+    editingId.value.add(id);
+  }
+
+  function endEditingName(id: string) {
+    editingId.value.delete(id);
+  }
   //#endregion
 
   // Load persisted characters on mount
@@ -224,222 +497,4 @@
     },
     { deep: true }
   );
-
-  //#region Helpers (dice, bonus formatting)
-  function roll3d6(): number {
-    return Array.from({ length: 3 }, () => Math.floor(Math.random() * 6) + 1).reduce(
-      (a, b) => a + b,
-      0
-    );
-  }
-
-  function getAbilityBonus(score: number): number {
-    const row = abilityScoreBonus.find(r => score >= r.min && score <= r.max);
-    return row?.bonus ?? 0;
-  }
-
-  function formatBonus(bonus: number): string {
-    if (bonus > 0) return `+${bonus}`;
-    if (bonus < 0) return `${bonus}`;
-    return '0';
-  }
-
-  // Localized occupation name (falls back to stored occupation string)
-  function getLocalizedOccupationName(char: LevelZeroCharacter): string {
-    const slug = String(char.occupation || '')
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '_')
-      .replace(/^_|_$/g, '');
-    if (slug && te(`occupations.${slug}.name`)) {
-      return String(t(`occupations.${slug}.name`));
-    }
-    return char.occupation;
-  }
-
-  // Localized equipment list (translate each EquipmentItem individually and include quantity/unit)
-  function getLocalizedEquipmentString(char: LevelZeroCharacter): string {
-    function slugify(s: string) {
-      return String(s || '')
-        .toLowerCase()
-        .replace(/[^a-z0-9]+/g, '_')
-        .replace(/^_|_$/g, '');
-    }
-
-    const parts: string[] = (char.equipment || []).map((item: EquipmentItem) => {
-      const slug = slugify(item.name);
-      // try equipment.<slug>.name -> fallback to item.name
-      let localizedName: string;
-      if (slug && te(`equipment.${slug}.name`)) {
-        localizedName = String(t(`equipment.${slug}.name`));
-      } else {
-        localizedName = item.name;
-      }
-
-      // quantity and unit formatting
-      const qty = item.quantity;
-      let unitLabel = item.unit;
-      if (slug && te(`equipment.${slug}.unit`)) {
-        unitLabel = String(t(`equipment.${slug}.unit`));
-      }
-
-      // optional observation: prefer parsed item.observation, then locale-specific observation keys
-      let obs: string | undefined = item.observation;
-      if (obs && slug && te(`equipment.${slug}.observation`))
-        obs = String(t(`equipment.${slug}.observation`));
-
-      let base: string;
-      if (qty != null) {
-        if (unitLabel) base = `${localizedName} (${qty} ${unitLabel})`;
-        else base = `${localizedName} (${qty}x)`;
-      } else {
-        base = localizedName;
-      }
-
-      if (obs) return `${base} — ${obs}`;
-      return base;
-    });
-
-    return parts.join(', ');
-  }
-
-  // Helper used by template to render equipment (localized) or fallback text
-  function getEquipmentDisplay(char: LevelZeroCharacter): string {
-    const s = getLocalizedEquipmentString(char);
-    return s && s.length ? s : String(t('manageLevelZero.none'));
-  }
-  //#endregion
-
-  //#region Generators (attributes & character)
-  function generateRandomAttributes(): CharacterAttributes {
-    return {
-      [AttributeType.STRENGTH]: roll3d6(),
-      [AttributeType.INTELLIGENCE]: roll3d6(),
-      [AttributeType.WISDOM]: roll3d6(),
-      [AttributeType.DEXTERITY]: roll3d6(),
-      [AttributeType.CONSTITUTION]: roll3d6(),
-      [AttributeType.CHARISMA]: roll3d6()
-    };
-  }
-
-  function generateLevelZeroCharacter(): LevelZeroCharacter {
-    const roll = Math.floor(Math.random() * 100) + 1; // 1..100
-    const occupationEntry = findEntryByRoll(Occupations, roll);
-    if (!occupationEntry) throw new Error(`No occupation for roll ${roll}`);
-
-    // convert weapon + occupation equipment into structured EquipmentItem objects
-    const equipment: EquipmentItem[] = [];
-    if (occupationEntry.weapon) {
-      equipment.push(occupationEntry.weapon);
-    }
-
-    equipment.push(...occupationEntry.equipment);
-
-    return {
-      id: uuidv4(),
-      name: generateCharacterName(),
-      attributes: generateRandomAttributes(),
-      occupation: occupationEntry.name,
-      equipment,
-      gp: roll3d6(),
-      createdAt: new Date()
-    };
-  }
-  //#endregion
-
-  //#region File I/O (import / export / copy)
-  function characterToJSON(char: LevelZeroCharacter): string {
-    return JSON.stringify({ ...char, createdAt: char.createdAt.toISOString() }, null, 2);
-  }
-
-  function copyCharacterToClipboard(char: LevelZeroCharacter) {
-    navigator.clipboard.writeText(characterToJSON(char));
-  }
-
-  function exportCharactersToJSON() {
-    const data = characters.value.map(c => ({ ...c, createdAt: c.createdAt.toISOString() }));
-    const json = JSON.stringify(data, null, 2);
-    const blob = new Blob([json], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `level-zero-characters-${new Date().toISOString().split('T')[0]}.json`;
-    document.body.appendChild(a);
-    a.click();
-    document.body.removeChild(a);
-    URL.revokeObjectURL(url);
-  }
-
-  function openFileInput() {
-    fileInput.value?.click();
-  }
-
-  function importCharactersFromJSON(event: Event) {
-    const input = event.target as HTMLInputElement;
-    const file = input.files?.[0];
-    if (!file) return;
-
-    const reader = new FileReader();
-    reader.onload = e => {
-      try {
-        const parsed = JSON.parse(String(e.target?.result));
-        const arr = Array.isArray(parsed) ? parsed : [parsed];
-        const imported: LevelZeroCharacter[] = arr.map((c: any) => {
-          // normalize equipment: support legacy string arrays and convert to structured items
-          const eqs: EquipmentItem[] = Array.isArray(c.equipment)
-            ? c.equipment.map((it: any) => ({
-                name: it.name,
-                quantity: it.quantity,
-                unit: it.unit,
-                observation: it.observation
-              }))
-            : [];
-          return {
-            ...c,
-            equipment: eqs,
-            gp: typeof c.gp === 'number' ? c.gp : 0,
-            createdAt: new Date(c.createdAt)
-          } as LevelZeroCharacter;
-        });
-        characters.value.push(...imported);
-      } catch (err) {
-        console.error('Import failed', err);
-        alert('Failed to import characters. Check file format.');
-      } finally {
-        if (fileInput.value) fileInput.value.value = '';
-      }
-    };
-    reader.readAsText(file);
-  }
-  //#endregion
-
-  //#region UI Actions (generate, remove, edit)
-  async function generateCharacters() {
-    isGenerating.value = true;
-    try {
-      await new Promise(res => setTimeout(res, 300));
-      const count = Math.min(Math.max(1, Number(charactersToGenerate.value || 1)), 100);
-      for (let i = 0; i < count; i++) {
-        characters.value.push(generateLevelZeroCharacter());
-      }
-    } finally {
-      isGenerating.value = false;
-    }
-  }
-
-  function removeCharacter(id: string) {
-    characters.value = characters.value.filter(c => c.id !== id);
-  }
-
-  function clearCharacters() {
-    characters.value = [];
-  }
-
-  function startEditingName(id: string) {
-    if (!editingId.value.includes(id)) editingId.value.push(id);
-  }
-
-  function endEditingName(id: string) {
-    editingId.value = editingId.value.filter(e => e !== id);
-  }
-  //#endregion
 </script>
