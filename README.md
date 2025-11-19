@@ -1,4 +1,4 @@
-# OSR Character Creator (Test Project)
+# OSR Character Creator
 
 This is a small test project I use to learn Vue and to experiment with code-assisted development.
 It aims to be a general manager for traditional Old School Renaissance (OSR) tabletop RPG systems, suitable for both players and GMs.
@@ -43,6 +43,7 @@ npm run format
 - Planned:
   - Testing;
   - Printable character sheets;
+  - Make app available to users;
   - Full character creator/editor;
   - Iimportable random tables & equipment lists, and API fetching (e.g., Open5e).
 
